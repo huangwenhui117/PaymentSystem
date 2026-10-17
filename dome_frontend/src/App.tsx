@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   ArrowDownLeft,
   ArrowDownRight,
@@ -33,15 +33,6 @@ type Payment = {
   status: PaymentStatus;
 };
 
-const startingPayments: Payment[] = [
-  { id: "PY-84291", name: "Olivia Rhye", email: "olivia@lanecollective.co", initials: "OR", color: "lilac", description: "Lane Collective · Invoice #1048", date: "Today, 10:42 AM", amount: 2450, status: "Completed" },
-  { id: "PY-84290", name: "Phoenix Baker", email: "phoenix@bakerstudio.com", initials: "PB", color: "peach", description: "Baker Studio · Monthly plan", date: "Today, 9:18 AM", amount: 890, status: "Pending" },
-  { id: "PY-84289", name: "Lana Steiner", email: "lana@wildflower.io", initials: "LS", color: "mint", description: "Wildflower · Invoice #1046", date: "Today, 8:03 AM", amount: 1250, status: "Completed" },
-  { id: "PY-84288", name: "Demi Wilkinson", email: "demi@frameworks.design", initials: "DW", color: "blue", description: "Frameworks · Design retainer", date: "Yesterday, 4:36 PM", amount: 3200, status: "Failed" },
-  { id: "PY-84287", name: "Candice Wu", email: "candice@northstar.shop", initials: "CW", color: "rose", description: "Northstar · Order #NS-3921", date: "Yesterday, 2:11 PM", amount: 168, status: "Completed" },
-  { id: "PY-84286", name: "Natali Craig", email: "natali@orbitandco.com", initials: "NC", color: "gold", description: "Orbit & Co. · Invoice #1043", date: "Yesterday, 11:25 AM", amount: 760, status: "Completed" },
-];
-
 const chartBars = [
   { day: "Mon", value: 42 },
   { day: "Tue", value: 65 },
@@ -55,11 +46,47 @@ const chartBars = [
 const money = (amount: number) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(amount);
 
+const formatPaymentDate = (value: string) => {
+  const date = new Date(value);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const day = date.toLocaleDateString();
+  const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  if (day === today.toLocaleDateString()) return `Today, ${time}`;
+  if (day === yesterday.toLocaleDateString()) return `Yesterday, ${time}`;
+  return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}, ${time}`;
+};
+
 function App() {
-  const [payments, setPayments] = useState(startingPayments);
+  const [payments, setPayments] = useState<Payment[]>([]);
   const [filter, setFilter] = useState<"All payments" | PaymentStatus>("All payments");
   const [query, setQuery] = useState("");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/payments")
+      .then((response) => {
+        if (!response.ok) throw new Error("The server could not load transactions.");
+        return response.json() as Promise<Payment[]>;
+      })
+      .then((data) => {
+        if (!cancelled) setPayments(data);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) setLoadError(error instanceof Error ? error.message : "Unable to load transactions.");
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredPayments = useMemo(() => payments.filter((payment) => {
     const matchesStatus = filter === "All payments" || payment.status === filter;
@@ -67,7 +94,7 @@ function App() {
     return matchesStatus && searchText.includes(query.toLowerCase());
   }), [filter, payments, query]);
 
-  function addPayment(event: FormEvent<HTMLFormElement>) {
+  async function addPayment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("name")).trim();
@@ -76,27 +103,29 @@ function App() {
     const amount = Number(formData.get("amount"));
     if (!name || !email || !description || !Number.isFinite(amount) || amount <= 0) return;
 
-    setPayments((current) => [{
-      id: `PY-${84292 + current.length - startingPayments.length}`,
-      name,
-      email,
-      initials: name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(),
-      color: "lilac",
-      description,
-      date: "Just now",
-      amount,
-      status: "Pending",
-    }, ...current]);
-    setFilter("All payments");
-    setQuery("");
-    setIsCreateOpen(false);
+    setFormError("");
+    try {
+      const response = await fetch("/api/payments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email, description, amount }),
+      });
+      if (!response.ok) throw new Error("The server could not save this payment.");
+      const payment: Payment = await response.json();
+      setPayments((current) => [payment, ...current]);
+      setFilter("All payments");
+      setQuery("");
+      setIsCreateOpen(false);
+    } catch (error: unknown) {
+      setFormError(error instanceof Error ? error.message : "Unable to save this payment.");
+    }
   }
 
   function exportPayments() {
     const rows = [
       ["Payment ID", "Customer", "Email", "Description", "Date", "Amount", "Status"],
       ...filteredPayments.map((payment) => [
-        payment.id, payment.name, payment.email, payment.description, payment.date, payment.amount.toFixed(2), payment.status,
+        payment.id, payment.name, payment.email, payment.description, formatPaymentDate(payment.date), payment.amount.toFixed(2), payment.status,
       ]),
     ];
     const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(",")).join("\n");
@@ -240,13 +269,15 @@ function App() {
                     <tr key={payment.id}>
                       <td><div className="customer-cell"><div className={`customer-avatar ${payment.color}`}>{payment.initials}</div><div><strong>{payment.name}</strong><span>{payment.email}</span></div></div></td>
                       <td><span className="description-text">{payment.description}</span><small className="payment-id">{payment.id}</small></td>
-                      <td className="date-cell">{payment.date}</td>
+                      <td className="date-cell">{formatPaymentDate(payment.date)}</td>
                       <td><span className={`status status-${payment.status.toLowerCase()}`}><i />{payment.status}</span></td>
                       <td className="amount-cell">{money(payment.amount)}</td>
                       <td><button className="row-action" type="button" aria-label={`More options for ${payment.id}`}><Ellipsis size={18} /></button></td>
                     </tr>
                   ))}
-                  {filteredPayments.length === 0 && <tr><td className="empty-state" colSpan={6}>No payments match your search.</td></tr>}
+                  {isLoading && <tr><td className="empty-state" colSpan={6}>Loading transactions...</td></tr>}
+                  {!isLoading && loadError && <tr><td className="empty-state" colSpan={6} role="alert">{loadError}</td></tr>}
+                  {!isLoading && !loadError && filteredPayments.length === 0 && <tr><td className="empty-state" colSpan={6}>No payments match your search.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -264,6 +295,7 @@ function App() {
             <label>Email address<input name="email" type="email" placeholder="alex@example.com" required /></label>
             <label>Description<input name="description" placeholder="e.g. Invoice #1049" required /></label>
             <label>Amount (USD)<div className="amount-input"><span>$</span><input min="0.01" name="amount" placeholder="0.00" required step="0.01" type="number" /></div></label>
+            {formError && <p className="modal-notice" role="alert">{formError}</p>}
             <p className="modal-notice"><Check size={15} /> This is a local demo entry. No money will be moved.</p>
             <div className="modal-actions"><button className="button button-secondary" onClick={() => setIsCreateOpen(false)} type="button">Cancel</button><button className="button button-primary" type="submit"><Plus size={16} />Add payment</button></div>
           </form>
